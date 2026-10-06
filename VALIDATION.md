@@ -4,8 +4,8 @@ Validation completed on 2026-10-06.
 
 | Environment | Result |
 | --- | --- |
-| Windows, Python 3.11.4 | 60 tests passed; 2 Linux-only integration tests skipped. |
-| Ubuntu WSL, Python 3.10.12, x86-64 GNU GCC/binutils | All 62 tests passed, including assembly and runtime integration. |
+| Windows, Python 3.11.4 | 68 tests passed; 2 Linux-only integration tests skipped. |
+| Ubuntu WSL, Python 3.10.12, x86-64 GNU GCC/binutils | All 70 tests passed, including assembly and runtime integration. |
 
 The project declares Python 3.11+ support. WSL's installed Python 3.10 was used
 for supplemental source/runtime validation. The checked-in GitHub Actions matrix
@@ -27,3 +27,11 @@ A project-local virtual environment was used to build
 without fetching dependencies. The installed CLI was checked from a temporary
 directory outside the source checkout against the good, broken, and red-zone
 examples, including strict exit policies and JSON output.
+
+The compiler-style text renderer was inspected using all three example reports.
+Renderer tests cover source ordering, shared uncertainty notes, related ranges,
+cross-file references, missing source, I/O errors, invalid positions, terminal
+control escaping, tab-expanded underlines, and prose widths of 40, 80, and 120
+columns. Color tests cover terminal detection, redirected output, explicit
+overrides, `NO_COLOR`, `TERM=dumb`, and unchanged JSON. Terminal width is measured
+once for text reports and is capped at 100 columns for prose.

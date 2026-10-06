@@ -2,44 +2,168 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import sys
+import textwrap
 
 from . import analyze
 
 
-def render_text(report, source):
-    lines = source.splitlines()
+RULE_TITLES = {
+    "ABI_STACK_ALIGNMENT": "Stack misaligned at transfer",
+    "ABI_STACK_RESTORE": "Stack pointer not restored",
+    "ABI_RETURN_ADDRESS": "Return address not preserved",
+    "ABI_CALLEE_SAVED": "Callee-saved register not preserved",
+    "ABI_DIRECTION_FLAG": "Direction flag must be clear",
+    "ABI_RED_ZONE_BOUNDS": "Access outside protected stack storage",
+    "ABI_RED_ZONE_LIVE": "Stack data may be clobbered by a call",
+    "ABI_RET_CLEANUP": "Unexpected stack cleanup on return",
+    "INPUT_IO": "Cannot read source file",
+}
+
+
+def _safe(text):
+    """Escape terminal controls, including controls embedded in filenames."""
+    return "".join(f"\\x{ord(c):02x}" if ord(c) < 32 or 127 <= ord(c) < 160 else c
+                   for c in str(text))
+
+
+def _style(text, code, color):
+    return f"\033[{code}m{text}\033[0m" if color else text
+
+
+def _prose(text, width, prefix=""):
+    text = _safe(" ".join(str(text).split()))
+    return textwrap.wrap(text, width=width, initial_indent=prefix,
+                         subsequent_indent=" " * len(prefix), break_on_hyphens=False) or [prefix]
+
+
+def _location(loc):
+    return f"{_safe(loc.filename)}:{loc.line}:{loc.column}"
+
+
+def _excerpt(filename, lines, primary, related, color, severity):
+    marks = {}
+    selected = set()
+    notes = []
+    for loc in dict.fromkeys((primary, *related)):
+        if loc.filename != filename or not 1 <= loc.line <= len(lines):
+            label = "source unavailable" if loc == primary else "related operation"
+            notes.append(f"   = {label}: {_location(loc)}")
+            continue
+        selected.add(loc.line)
+        if loc == primary:
+            selected.update(range(max(1, loc.line - 1), min(len(lines), loc.line + 1) + 1))
+        marks.setdefault(loc.line, []).append(loc)
     output = []
-    for diagnostic in report.diagnostics:
-        loc = diagnostic.location
-        function = f" [{diagnostic.function}]" if diagnostic.function else ""
-        output.append(f"{loc.filename}:{loc.line}:{loc.column}: {diagnostic.category} {diagnostic.rule_id}{function}: {diagnostic.message}")
-        if 1 <= loc.line <= len(lines):
-            line = lines[loc.line - 1]
-            output.extend((f"  {line}", "  " + " " * (loc.column - 1) + "^"))
-        for related in diagnostic.related_locations:
-            output.append(f"  related: {related.filename}:{related.line}:{related.column}")
-        if diagnostic.suggestion:
-            output.append(f"  suggestion: {diagnostic.suggestion}")
+    gutter = len(str(max(selected))) if selected else 1
+    bar = " " * (gutter + 1) + " |"
+    if selected:
+        output.append(bar)
+    previous = None
+    for number in sorted(selected):
+        if previous is not None and number > previous + 1:
+            output.append(" " * (gutter + 1) + " ...")
+        raw = lines[number - 1]
+        output.append(f" {number:>{gutter}} | {_safe(raw.expandtabs(4))}")
+        for loc in marks.get(number, ()):
+            start = min(max(loc.column - 1, 0), len(raw))
+            token = re.match(r"[^\s,;()]+", raw[start:])
+            end = start + len(token.group()) if token else start + 1
+            before = _safe(raw[:start].expandtabs(4))
+            expanded = _safe(raw[:end].expandtabs(4))
+            underline = ("^" if loc == primary else "-") * max(1, len(expanded) - len(before))
+            if loc == primary:
+                underline = _style(underline, severity, color)
+            else:
+                underline += " related operation"
+            output.append(bar + " " + " " * len(before) + underline)
+        previous = number
+    if selected:
+        output.append(bar)
+    return output + notes
+
+
+def render_text(report, source, *, width=88, color=False):
+    """Render compiler-style diagnostics without changing the report data."""
+    width = max(24, min(width, 100))
+    lines = source.split("\n") if source else []
+    lines = [line.removesuffix("\r") for line in lines]
+    diagnostics = sorted(report.diagnostics, key=lambda d: (
+        d.location, d.function or "", d.rule_id, d.category, d.message))
+    counts = [sum(d.category == category for d in diagnostics)
+              for category in ("error", "warning", "analysis_gap")]
+    output = [_style(_safe(report.filename), "1", color)]
+    labels = ("error", "warning", "analysis gap")
+    output.extend(_prose(" | ".join(f"{count} {label}{'' if count == 1 else 's'}"
+                                  for count, label in zip(counts, labels)), width))
+    warnings = {(d.location, d.function) for d in diagnostics if d.category == "warning"}
+    attached = {}
+    for d in diagnostics:
+        if d.rule_id == "ANALYSIS_UNKNOWN" and (d.location, d.function) in warnings:
+            attached.setdefault((d.location, d.function), []).append(d)
+    grouped_notes = [d for notes in attached.values() for d in notes]
+    for d in diagnostics:
+        key = (d.location, d.function)
+        if d in grouped_notes:
+            continue
+        extra = attached.pop(key, []) if d.category == "warning" else []
+        severity = {"error": "1;31", "warning": "1;33", "analysis_gap": "1;36"}.get(d.category, "1")
+        label = "analysis gap" if d.category == "analysis_gap" else d.category
+        title = RULE_TITLES.get(d.rule_id, d.message)
+        output.append("")
+        output.extend(_style(line, severity, color)
+                      for line in _prose(f"{label}[{d.rule_id}]: {title}", width))
+        output.append(f"  --> {_location(d.location)}")
+        related = (*d.related_locations, *(loc for note in extra for loc in note.related_locations))
+        output.extend(_excerpt(report.filename, lines, d.location, related, color, severity))
+        if d.function:
+            output.extend(_prose(d.function, width, "   = function: "))
+        output.extend(_prose(d.message, width, "   = note: "))
+        if d.suggestion:
+            output.extend(_prose(d.suggestion, width, "   = help: "))
+        for note in extra:
+            output.extend(_prose(f"Analysis note [{note.rule_id}]: {note.message}", width, "   = note: "))
+            if note.suggestion:
+                output.extend(_prose(note.suggestion, width, "   = help: "))
+    output.append("")
+    if not diagnostics and report.complete:
+        output.extend(_prose("No issues found in the supported checks.", width))
+    count = len(report.functions)
+    analyzed = sum(f.analyzed_instructions for f in report.functions)
+    reachable = sum(f.reachable_instructions for f in report.functions)
+    status = "complete" if report.complete else "incomplete"
+    summary = (f"Analysis {status}: {count} {'function' if count == 1 else 'functions'}, "
+               f"{analyzed}/{reachable} reachable instructions analyzed.")
+    output.extend(_prose(summary, width))
     for function in report.functions:
-        status = "complete" if function.complete else "incomplete"
-        boundary = "; inferred boundaries" if function.boundaries_inferred else ""
-        output.append(f"{report.filename}: {function.name}: {status} coverage; "
-            f"{function.analyzed_instructions}/{function.reachable_instructions} reached instructions analyzed"
-            f" ({function.total_instructions} total){boundary}.")
-    if not report.diagnostics and report.complete:
-        output.append(f"{report.filename}: No issues found in the supported checks.")
-    elif not report.complete:
-        output.append(f"{report.filename}: Analysis is incomplete; inspect the reported gaps.")
+        if not function.complete:
+            reasons = ", ".join(function.incomplete_checks) or "See reported analysis gaps"
+            output.extend(_prose(f"{function.name}: {reasons}", width, "  Incomplete: "))
+    inferred = [f.name for f in report.functions if f.boundaries_inferred]
+    if inferred:
+        output.extend(_prose(", ".join(inferred), width, "  Inferred boundaries: "))
     return "\n".join(output)
 
 
+def _use_color(mode):
+    if mode != "auto":
+        return mode == "always"
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Check ordinary System V AMD64 functions in plain GNU AT&T source.")
+    parser = argparse.ArgumentParser(
+        description="Check ordinary System V AMD64 functions in plain GNU AT&T source.",
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, width=88))
     parser.add_argument("files", nargs="+", help="source files; '-' reads standard input")
     parser.add_argument("--entry", action="append", default=[], metavar="NAME", help="select or identify an entry label (repeatable)")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                        help="terminal styling (default: auto; respects NO_COLOR and TERM=dumb)")
     parser.add_argument("--strict", action="store_true", help="also fail on possible violations and analysis gaps")
     args = parser.parse_args(argv)
     if args.files.count("-") > 1:
@@ -59,7 +183,9 @@ def main(argv=None):
     if args.format == "json":
         print(json.dumps({"schema_version": 1, "reports": [r.to_dict() for r in reports]}, indent=2, sort_keys=True))
     else:
-        print("\n\n".join(render_text(r, s) for r, s in zip(reports, sources)))
+        width = shutil.get_terminal_size(fallback=(88, 24)).columns if sys.stdout.isatty() else 88
+        color = _use_color(args.color)
+        print("\n\n".join(render_text(r, s, width=width, color=color) for r, s in zip(reports, sources)))
     if any(r.input_errors for r in reports):
         return 2
     if any(d.category == "error" or args.strict for r in reports for d in r.diagnostics):

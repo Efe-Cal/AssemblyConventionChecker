@@ -65,6 +65,59 @@ Allocate eight bytes before the call and release them afterward, accounting for
 any other pushes or local allocation. The diagnostic includes the offending
 source location, related stack operations, and a correction suggestion.
 
+## Reading text reports
+
+Each file starts with severity counts. Findings use compiler-style blocks with
+a stable rule ID, a short title, a navigable location, and numbered source lines:
+
+```text
+examples/broken.s
+3 errors | 0 warnings | 0 analysis gaps
+
+error[ABI_STACK_ALIGNMENT]: Stack misaligned at transfer
+  --> examples/broken.s:7:5
+   |
+ 6 |     movq $42,%rbx
+ 7 |     call helper@PLT
+   |     ^^^^
+ 8 |     std
+   |
+   = function: example
+   = note: %rsp modulo 16 is 8; this call requires 0.
+   = help: Account for the return address and all pushes when adjusting the stack.
+```
+
+`note:` contains the full explanation; `help:` suggests a correction. Related
+operations have dashed underlines in the same excerpt, with `...` between distant
+source ranges. References to other files remain explicit location notes.
+An `ANALYSIS_UNKNOWN` gap accompanying a warning at the same location appears as
+an analysis note instead of repeating the excerpt; it still counts as a gap.
+
+The footer summarizes analyzed/reachable instruction counts and lists incomplete
+functions with their reasons. Inferred function boundaries are also identified.
+Errors can have complete coverage: completeness describes how much was analyzed,
+not whether the code complies with the checked obligations.
+
+```console
+abi-check examples/broken.s --color never
+abi-check examples/broken.s --color always
+```
+
+`--color auto` is the default: bold headings and standard severity colors appear
+only when standard output is a terminal, unless `NO_COLOR` is set or `TERM=dumb`.
+Explicit `always` and `never` override automatic detection. All severities also
+have text labels. Redirected text and JSON have no ANSI styling by default;
+JSON is unaffected even by `--color always`.
+
+Prose wraps to the terminal width, capped at 100 columns, with an 88-column
+fallback for redirected output. Source lines remain intact, tabs expand at
+four-column stops, and terminal control characters are escaped. Unavailable
+source locations are reported without an excerpt.
+
+Python callers can use `render_text(report, source, *, width=88, color=False)`
+from `assembly_convention_checker.cli`; the existing two-argument call remains
+supported. Rendering does not alter report data or exit policies.
+
 ## What it checks
 
 | Rule ID | Obligation |
@@ -83,8 +136,8 @@ The checker assumes ordinary returning callees obey that convention. Each
 discovered function is analyzed independently; its body's violations do not
 change the abstract call summary used by its callers.
 
-Text output includes each function's coverage and whether boundaries were
-inferred. `complete` describes analysis coverage, not the absence of diagnostics.
+Text output summarizes coverage and identifies incomplete functions and inferred
+boundaries. `complete` describes analysis coverage, not the absence of diagnostics.
 
 | Category | Interpretation |
 | --- | --- |
