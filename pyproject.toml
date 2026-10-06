@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "assembly-convention-checker"
+version = "0.1.0"
+description = "Source-level System V AMD64 ABI checks for GNU AT&T assembly"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = []
+
+[project.scripts]
+abi-check = "assembly_convention_checker.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["assembly_convention_checker*"]
