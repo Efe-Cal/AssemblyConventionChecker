@@ -188,8 +188,10 @@ def main(argv=None):
             parser.error(f"Invalid buffer JSON: {exc}")
     reports, sources, included_sources = [], [], {}
     def load_include(name, parent):
-        path = (Path(parent).parent / name).resolve()
-        text = buffers[str(path)] if str(path) in buffers else path.read_text(encoding="utf-8-sig")
+        # Preserve the editor's path spelling (including Windows short paths).
+        path = Path(os.path.abspath(Path(parent).parent / name))
+        key = str(path.resolve())
+        text = buffers[key] if key in buffers else path.read_text(encoding="utf-8-sig")
         included_sources[str(path)] = text
         return str(path), text
 

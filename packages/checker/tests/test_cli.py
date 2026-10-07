@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -89,6 +90,34 @@ class CliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertEqual("helper: ret\n", payload["sources"][str(child.resolve())])
             self.assertEqual(["helper", "f"], [f["name"] for f in payload["reports"][0]["functions"]])
+
+    @unittest.skipUnless(os.name == "nt", "Windows short paths")
+    def test_include_preserves_windows_short_path(self):
+        import ctypes
+        from ctypes import wintypes
+
+        short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+        short_path.restype = wintypes.DWORD
+        with tempfile.TemporaryDirectory(prefix="acc-long-include-path-") as temporary:
+            directory = Path(temporary).resolve()
+            name = ctypes.create_unicode_buffer(32768)
+            self.assertGreater(short_path(str(directory), name, len(name)), 0)
+            alias = Path(name.value)
+            if str(alias).lower() == str(directory).lower():
+                self.skipTest("Short path names are disabled on this volume")
+            child = directory / "helper.s"
+            child.write_text("helper: ret\n")
+            source = '.include "helper.s"\n.globl f\nf: subq $8,%rsp; call helper; addq $8,%rsp; ret\n'
+            arguments = ("--stdin-filename", str(alias / "main.s"), "--buffer-json", "--format", "json")
+            for buffers, expected in (({}, "helper: ret\n"),
+                                      ({str(alias / "helper.s"): "helper: std; ret\n"}, "helper: std; ret\n")):
+                with self.subTest(buffers=buffers):
+                    status, output = self.invoke(json.dumps({"source": source, "buffers": buffers}), arguments)
+                    payload = json.loads(output)
+                    self.assertEqual(int(bool(buffers)), status)
+                    self.assertEqual({str(alias / "helper.s"): expected}, payload["sources"])
+                    self.assertEqual(str(alias / "helper.s"), payload["reports"][0]["functions"][0]["location"]["filename"])
 
     def test_invalid_buffer_json(self):
         for source in ('[]', '{"source":3}', '{"source":"", "buffers":null}'):
