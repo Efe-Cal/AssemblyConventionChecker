@@ -14,6 +14,42 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install .
+      - run: python -m pip install ./packages/checker
       - run: python -m unittest discover -v
-      - run: abi-check tests/fixtures/good_frame.s --strict
+        working-directory: packages/checker
+      - run: abi-check packages/checker/tests/fixtures/good_frame.s --strict
+  extension:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:extension
+      - run: xvfb-run -a npm run test:integration
+        if: runner.os == 'Linux'
+      - run: npm run test:integration
+        if: runner.os == 'Windows'
+      - run: npx playwright install --with-deps chromium
+        if: runner.os == 'Linux'
+      - run: npm run test:visual
+        if: runner.os == 'Linux'
+      - run: npm run package
+      - run: xvfb-run -a npm run test:package
+        if: runner.os == 'Linux'
+      - run: npm run test:package
+        if: runner.os == 'Windows'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ runner.os }}
+          path: |
+            dist/*.vsix
+            artifacts/visual/*.png

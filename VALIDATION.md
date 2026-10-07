@@ -1,37 +1,33 @@
-# Local validation
+# Monorepo and extension validation
 
-Validation completed on 2026-10-06.
+Local validation on 2026-10-06 used Windows, Python 3.11.4, Node.js 22.16.0,
+VS Code 1.140.0, and Playwright Chromium. Historical checker validation remains
+in [the checker package](packages/checker/VALIDATION.md).
 
-| Environment | Result |
+| Check | Result |
 | --- | --- |
-| Windows, Python 3.11.4 | 68 tests passed; 2 Linux-only integration tests skipped. |
-| Ubuntu WSL, Python 3.10.12, x86-64 GNU GCC/binutils | All 70 tests passed, including assembly and runtime integration. |
+| Python source suite | 71 tests: 69 passed, 2 Linux-only tests skipped. Includes the pre-existing instruction-suffix test. |
+| Extension runtime unit tests | All 12 passed: Python execution, input errors, entry selection, JSON validation, Unicode ranges, generations, cancellation, timeout, and UTF-8 decoding. |
+| VS Code extension-host integration | Passed: activation, all diagnostic severities, unsaved edits, settings, document versions, stable refresh layout, real webview script/CSP loading, report reuse, navigation, URI rejection, and import isolation. |
+| Visual checks | Dark, light, and high-contrast themes at 1180 and 520 pixels; severity/function filters, keyboard navigation and focus, clean/incomplete states, setup states, long findings, escaped content, reduced motion, and overflow checks. |
+| Installed CLI | The relocated Python package built and installed into a fresh virtual environment; installed `abi-check` passed the strict good-frame fixture. |
+| Packaged extension | VSIX extracted outside the checkout and run in VS Code with a fresh Python environment containing no installed checker. Bundled analysis and editor integration passed. |
+| Dependencies | npm audit reports zero vulnerabilities; the extension ships no Node runtime dependencies. |
 
-The project declares Python 3.11+ support. WSL's installed Python 3.10 was used
-for supplemental source/runtime validation. The checked-in GitHub Actions matrix
-targets Python 3.11 and 3.13 on Windows and Ubuntu; it has not been run remotely.
-
-Commands used for the source suites:
+Reproduce from the repository root:
 
 ```console
-python -B -m unittest discover -q
-wsl -d Ubuntu --cd /mnt/c/Users/efeca/Desktop/AssemblyConventionChecker --exec python3 -B -m unittest discover -q
+npm ci
+npm test
+npm run test:integration
+npx playwright install chromium
+npm run test:visual
+npm run package
+npm run test:package
 ```
 
-The runtime harness verifies saved-register sentinels, call-stack alignment,
-clear DF, red-zone clobbering, and the effects of zero-count 32-bit shifts and
-false 32-bit conditional moves. It executes only checked-in fixtures.
-
-A project-local virtual environment was used to build
-`dist/assembly_convention_checker-0.1.0-py3-none-any.whl` and install that wheel
-without fetching dependencies. The installed CLI was checked from a temporary
-directory outside the source checkout against the good, broken, and red-zone
-examples, including strict exit policies and JSON output.
-
-The compiler-style text renderer was inspected using all three example reports.
-Renderer tests cover source ordering, shared uncertainty notes, related ranges,
-cross-file references, missing source, I/O errors, invalid positions, terminal
-control escaping, tab-expanded underlines, and prose widths of 40, 80, and 120
-columns. Color tests cover terminal detection, redirected output, explicit
-overrides, `NO_COLOR`, `TERM=dumb`, and unchanged JSON. Terminal width is measured
-once for text reports and is capped at 100 columns for prose.
+Use `ACC_VSCODE_EXECUTABLE` to test an installed VS Code executable. Otherwise,
+the integration runner downloads VS Code 1.100.3. Screenshots and machine-readable
+results are in `artifacts/`. The CI configuration covers Windows and Ubuntu,
+but the updated workflow has not yet run remotely. Marketplace publication is
+not part of this delivery.

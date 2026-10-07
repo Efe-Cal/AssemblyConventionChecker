@@ -64,6 +64,22 @@ class CheckerTests(unittest.TestCase):
         for body in ("movb $0,%bl", "movw $0,%bx", "xorl %ebx,%ebx", "movl %ebx,%ebx"):
             with self.subTest(body=body): self.check(body + "\nret", [("ABI_CALLEE_SAVED", "error")])
 
+    def test_instruction_size_suffixes(self):
+        for suffix, register, size in (("b", "al", 1), ("w", "ax", 2), ("l", "eax", 4), ("q", "rax", 8)):
+            for destination in (f"%{register}", f"-{size}(%rsp)"):
+                with self.subTest(suffix=suffix, destination=destination):
+                    self.clean(
+                        f"mov{suffix} $3,{destination}\n"
+                        f"and{suffix} $1,{destination}\n"
+                        f"cmp{suffix} $1,{destination}\nje 1f\nstd\n1: ret"
+                    )
+            wrong_register = "%eax" if suffix == "q" else "%rax"
+            for mnemonic in ("cmp", "and"):
+                with self.subTest(suffix=suffix, mnemonic=mnemonic, mismatch=True):
+                    report = self.check(f"{mnemonic}{suffix} $1,{wrong_register}\nret",
+                        [("INPUT_INSTRUCTION", "error")])
+                    self.assertTrue(report.input_errors)
+
     def test_all_preserved_registers(self):
         for name in ("rbx", "rbp", "r12", "r13", "r14", "r15"):
             self.clean(f"pushq %{name}\nxorq %{name},%{name}\npopq %{name}\nret")
@@ -78,8 +94,9 @@ class CheckerTests(unittest.TestCase):
             self.clean(f"subq $8,%rsp\ncall {target}\naddq $8,%rsp\nret")
 
     def test_unmarked_internal_call(self):
-        self.check("subq $8,%rsp\ncall helper\naddq $8,%rsp\nret\nhelper: ret",
-            [("ANALYSIS_UNMARKED_CALLEE", "analysis_gap")])
+        report = analyze(function("subq $8,%rsp\ncall helper\naddq $8,%rsp\nret\nhelper: ret", metadata=False))
+        self.assertEqual(["f", "helper"], [f.name for f in report.functions])
+        self.assertEqual([], report.diagnostics)
         self.assertTrue(self.check("call 1f\nret", [("INPUT_INSTRUCTION", "error")]).input_errors)
 
     def test_special_dot_branch(self):

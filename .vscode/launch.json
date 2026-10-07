@@ -1,0 +1,4 @@
+{
+  "version": "0.2.0",
+  "configurations": [{"name": "Assembly Checker Extension", "type": "extensionHost", "request": "launch", "args": ["--extensionDevelopmentPath=${workspaceFolder}/packages/vscode", "${workspaceFolder}/packages/checker/examples"], "outFiles": ["${workspaceFolder}/packages/vscode/out/host/**/*.js"], "preLaunchTask": "Build extension"}]
+}

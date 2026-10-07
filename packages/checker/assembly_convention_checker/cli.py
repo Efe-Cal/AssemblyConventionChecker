@@ -87,7 +87,7 @@ def _excerpt(filename, lines, primary, related, color, severity):
     return output + notes
 
 
-def render_text(report, source, *, width=88, color=False):
+def render_text(report, source, *, width=88, color=False, included_sources=None):
     """Render compiler-style diagnostics without changing the report data."""
     width = max(24, min(width, 100))
     lines = source.split("\n") if source else []
@@ -119,7 +119,10 @@ def render_text(report, source, *, width=88, color=False):
                       for line in _prose(f"{label}[{d.rule_id}]: {title}", width))
         output.append(f"  --> {_location(d.location)}")
         related = (*d.related_locations, *(loc for note in extra for loc in note.related_locations))
-        output.extend(_excerpt(report.filename, lines, d.location, related, color, severity))
+        excerpt_source = (included_sources or {}).get(d.location.filename)
+        output.extend(_excerpt(d.location.filename if excerpt_source is not None else report.filename,
+                               excerpt_source.splitlines() if excerpt_source is not None else lines,
+                               d.location, related, color, severity))
         if d.function:
             output.extend(_prose(d.function, width, "   = function: "))
         output.extend(_prose(d.message, width, "   = note: "))
@@ -165,14 +168,37 @@ def main(argv=None):
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto",
                         help="terminal styling (default: auto; respects NO_COLOR and TERM=dumb)")
     parser.add_argument("--strict", action="store_true", help="also fail on possible violations and analysis gaps")
+    parser.add_argument("--stdin-filename", help="path for standard input, also used to resolve relative .include files")
+    parser.add_argument("--buffer-json", action="store_true", help="read {source, buffers} JSON from stdin and return included sources")
     args = parser.parse_args(argv)
     if args.files.count("-") > 1:
         parser.error("standard input may only be specified once")
-    reports, sources = [], []
+    if args.buffer_json and args.files != ["-"]:
+        parser.error("--buffer-json requires exactly one standard-input source")
+    buffers = {}
+    buffered_source = None
+    if args.buffer_json:
+        try:
+            payload = json.load(sys.stdin)
+            buffered_source, buffers = payload["source"], payload.get("buffers", {})
+            if not isinstance(buffered_source, str) or not isinstance(buffers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in buffers.items()):
+                raise ValueError("source and buffer values must be strings")
+            buffers = {str(Path(k).resolve()): v for k, v in buffers.items()}
+        except (ValueError, KeyError, TypeError) as exc:
+            parser.error(f"Invalid buffer JSON: {exc}")
+    reports, sources, included_sources = [], [], {}
+    def load_include(name, parent):
+        path = (Path(parent).parent / name).resolve()
+        text = buffers[str(path)] if str(path) in buffers else path.read_text(encoding="utf-8-sig")
+        included_sources[str(path)] = text
+        return str(path), text
+
     for filename in args.files:
         try:
-            source = sys.stdin.read() if filename == "-" else Path(filename).read_text(encoding="utf-8-sig")
-            report = analyze(source, filename="<stdin>" if filename == "-" else filename, entries=args.entry)
+            source = (buffered_source if buffered_source is not None else sys.stdin.read()) if filename == "-" else Path(filename).read_text(encoding="utf-8-sig")
+            source_name = (args.stdin_filename or "<stdin>") if filename == "-" else filename
+            report = analyze(source, filename=source_name, entries=args.entry,
+                             include_loader=load_include if source_name != "<stdin>" else None)
         except (OSError, UnicodeError) as exc:
             from .model import AnalysisReport, Diagnostic, SourceLocation
             source = ""
@@ -181,11 +207,14 @@ def main(argv=None):
         reports.append(report)
         sources.append(source)
     if args.format == "json":
-        print(json.dumps({"schema_version": 1, "reports": [r.to_dict() for r in reports]}, indent=2, sort_keys=True))
+        payload = {"schema_version": 1, "reports": [r.to_dict() for r in reports]}
+        if args.buffer_json:
+            payload["sources"] = included_sources
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         width = shutil.get_terminal_size(fallback=(88, 24)).columns if sys.stdout.isatty() else 88
         color = _use_color(args.color)
-        print("\n\n".join(render_text(r, s, width=width, color=color) for r, s in zip(reports, sources)))
+        print("\n\n".join(render_text(r, s, width=width, color=color, included_sources=included_sources) for r, s in zip(reports, sources)))
     if any(r.input_errors for r in reports):
         return 2
     if any(d.category == "error" or args.strict for r in reports for d in r.diagnostics):

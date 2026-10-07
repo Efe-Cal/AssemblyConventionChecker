@@ -6,11 +6,18 @@ source and renders either explanatory text or versioned JSON.
 
 ## Source intermediate representation
 
+An optional include loader expands local files before parsing while preserving
+the containing source's symbol and section context. The CLI supplies a file
+loader; the Python API performs no implicit I/O. Missing and recursive includes
+produce input errors at their include sites. Other expansion directives still
+require pre-expanded source.
+
 The parser retains original file/line/column positions for labels, instructions,
 and directives. Typed operands distinguish registers, immediates, symbolic
 references, and memory addressing. Numeric labels resolve by source order.
 
-Function discovery produces nonoverlapping instruction regions and aliases.
+Function discovery produces entry regions and aliases from metadata, direct calls,
+and pointer tables. Shared branch blocks can be reached from multiple regions.
 All discovered entries remain available for recognizing tails even if the caller
 selects only some functions. Metadata conflicts remain visible in the report.
 
@@ -33,8 +40,13 @@ operations can weaken their result to unknown. Low-bit stack alignment remains
 usable even when exact offsets are lost; known frame pointers can subsequently
 recover the exact stack position.
 
-A worklist propagates states to control-flow successors. Joins retain equal
-facts and weaken differing facts; memory retains only agreeing cell ranges.
+A worklist propagates states to control-flow successors. Small countdown loops
+retain separate states for counter values 0–32 until leaving the loop. Functions
+with unsigned division additionally retain stack depths from -512 to +128 bytes;
+quotient bounds allow digit extraction loops to terminate without losing saves.
+Outside these finite partitions, the ordinary conservative joins apply.
+Joins retain equal facts and weaken differing facts; memory retains only agreeing
+cell ranges.
 Origins are finite sets of source instruction locations. This domain converges
 for loops; a defensive work limit reports a gap if exhausted.
 
@@ -49,7 +61,8 @@ a proof that a route is executable.
 
 Cells hold a byte width and a value at an entry-relative offset. Exact stores
 replace overlapping cells; partial overlaps discard old whole-cell knowledge,
-which can yield uncertainty when a later wider load occurs. Unknown stores
+which can yield uncertainty when a later wider load occurs. Direct global and
+RIP-relative stores do not alias stack saves. Unknown stores
 invalidate potentially aliased saves and the return-address slot.
 
 Calls invalidate memory below the call-time stack pointer, make caller-saved

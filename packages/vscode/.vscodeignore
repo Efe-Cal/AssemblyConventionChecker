@@ -1,0 +1,10 @@
+src/**
+webview/**
+test/**
+scripts/**
+node_modules/**
+tsconfig.json
+**/*.map
+**/__pycache__/**
+**/*.pyc
+out/host/test/**

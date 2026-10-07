@@ -1,0 +1,4 @@
+{
+  "compilerOptions": {"target": "ES2022", "module": "none", "strict": true, "lib": ["ES2022", "DOM"], "types": [], "outFile": "../out/webview/report.js", "skipLibCheck": true},
+  "include": ["report.ts"]
+}

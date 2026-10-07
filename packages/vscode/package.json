@@ -1,0 +1,137 @@
+{
+  "name": "assembly-convention-checker",
+  "displayName": "Assembly Convention Checker",
+  "description": "Live System V AMD64 ABI diagnostics and beautifully precise assembly reports.",
+  "version": "0.1.0",
+  "publisher": "assembly-convention-checker",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {"type": "git", "url": "https://github.com/Efe-Cal/AssemblyConventionChecker.git", "directory": "packages/vscode"},
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=22"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "assembly",
+    "ABI",
+    "AT&T",
+    "AMD64",
+    "System V"
+  ],
+  "icon": "media/icon.png",
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./out/host/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Reports are available, but running the Python checker requires a trusted workspace.",
+      "restrictedConfigurations": [
+        "assemblyConventionChecker.pythonPath"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "The checker requires a desktop or remote Python extension host."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "assemblyConventionChecker.analyze",
+        "title": "Analyze Current File",
+        "category": "Assembly Convention Checker",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "assemblyConventionChecker.openReport",
+        "title": "Open Report",
+        "category": "Assembly Convention Checker",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "assemblyConventionChecker.selectPython",
+        "title": "Select Python Interpreter",
+        "category": "Assembly Convention Checker"
+      },
+      {
+        "command": "assemblyConventionChecker.showOutput",
+        "title": "Show Output",
+        "category": "Assembly Convention Checker"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "assemblyConventionChecker.openReport",
+          "when": "resourceExtname == .s || resourceExtname == .S || editorLangId == gas || editorLangId == asm || editorLangId == assembly",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Assembly Convention Checker",
+      "properties": {
+        "assemblyConventionChecker.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable assembly analysis."
+        },
+        "assemblyConventionChecker.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Python 3.11+ executable path. Leave empty for automatic discovery. Supply an executable, not a shell command."
+        },
+        "assemblyConventionChecker.runOn": {
+          "type": "string",
+          "enum": [
+            "change",
+            "save",
+            "manual"
+          ],
+          "default": "change",
+          "enumDescriptions": [
+            "Check when opening, saving, and after an editing pause.",
+            "Check when opening and saving.",
+            "Check only through Analyze Current File."
+          ],
+          "description": "When to run analysis."
+        },
+        "assemblyConventionChecker.entries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Entry labels to analyze. An empty list analyzes all discovered functions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "vscode:prepublish": "npm run build",
+    "test": "npm run build && node --test test/unit.test.cjs",
+    "test:integration": "npm run build && node test/integration.cjs",
+    "test:visual": "npm run build && node test/visual.cjs",
+    "package": "vsce package --no-dependencies --no-rewrite-relative-links --skip-license --out ../../dist/assembly-convention-checker-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^4.0.0",
+    "playwright": "^1.56.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -70,6 +70,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, process.returncode, process.stderr)
         self.assertIn("No issues found", process.stdout)
 
+    def test_includes_in_files_and_unsaved_buffers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "main.s"
+            child = Path(temporary) / "helper.s"
+            source = '.include "helper.s"\n.globl f\nf: subq $8,%rsp; call helper; addq $8,%rsp; ret\n'
+            root.write_text(source)
+            child.write_text("helper: std; ret\n")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main([str(root)])
+            self.assertEqual(1, status)
+            self.assertIn("helper: std; ret", output.getvalue())
+            self.assertNotIn("source unavailable", output.getvalue())
+            status, output = self.invoke(json.dumps({"source": source, "buffers": {str(child): "helper: ret\n"}}),
+                                         ("--stdin-filename", str(root), "--buffer-json", "--format", "json"))
+            self.assertEqual(0, status)
+            payload = json.loads(output)
+            self.assertEqual("helper: ret\n", payload["sources"][str(child.resolve())])
+            self.assertEqual(["helper", "f"], [f["name"] for f in payload["reports"][0]["functions"]])
+
+    def test_invalid_buffer_json(self):
+        for source in ('[]', '{"source":3}', '{"source":"", "buffers":null}'):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+                self.invoke(source, ("--buffer-json",))
+            self.assertEqual(2, exc.exception.code)
+
     def test_invalid_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
             main(["-", "-"])

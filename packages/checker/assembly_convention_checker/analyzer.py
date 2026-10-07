@@ -32,6 +32,7 @@ FIXED = {
     "cbtw": "cbw", "cbw": "cbw", "cwtl": "cwde", "cwde": "cwde",
     "cltq": "cdqe", "cdqe": "cdqe", "cwtd": "cwd", "cwd": "cwd",
     "cltd": "cdq", "cdq": "cdq", "cqto": "cqo", "cqo": "cqo",
+    "syscall": "syscall",
 }
 
 
@@ -83,7 +84,9 @@ def from_bytes(values: tuple[Value, ...]) -> Value:
 
 
 def has_unknown(value: Value) -> bool:
-    return value.kind in ("unknown", "invalidated") or (value.kind == "bytes" and any(has_unknown(b) for b in value.data))
+    return (value.kind in ("unknown", "invalidated", "unsigned_range")
+            or (value.kind == "byte" and value.data[0] in ("unknown", "invalidated", "unsigned_range"))
+            or (value.kind == "bytes" and any(has_unknown(b) for b in value.data)))
 
 
 def unknown(*values: Value, origin: int | None = None) -> Value:
@@ -292,10 +295,19 @@ class Engine:
         base = self.read_register(state, operand.base) if operand.base and operand.base.gpr else UNKNOWN
         index = self.read_register(state, operand.index) if operand.index and operand.index.gpr else Value("constant", 0)
         if base.kind == "stack" and index.kind == "constant":
-            return base.data + index.data * operand.scale + operand.value
+            return base.data + signed(index.data, 64) * operand.scale + operand.value
         if operand.base is None and index.kind == "stack" and operand.scale == 1:
             return index.data + operand.value
         return None
+
+    def nonstack_address(self, state, operand):
+        if operand.kind == "symbol":
+            return True
+        if operand.base and operand.base.parent == "rip":
+            return True
+        if operand.base and operand.base.gpr and not operand.index:
+            return state.registers[operand.base.parent].kind == "static_address"
+        return operand.base is None and operand.index is None
 
     def check_extent(self, state, address, size):
         sp = state.registers["rsp"]
@@ -353,7 +365,8 @@ class Engine:
         address = self.address(state, operand)
         if address is None:
             # Unknown stores can alias a saved register or the return address.
-            state.memory = {a: Cell(c.size, unknown(c.value, origin=self.pc)) for a, c in state.memory.items()}
+            if not self.nonstack_address(state, operand):
+                state.memory = {a: Cell(c.size, unknown(c.value, origin=self.pc)) for a, c in state.memory.items()}
             if value.kind == "stack":
                 state.escaped = True
         else:
@@ -364,6 +377,9 @@ class Engine:
 
     def set_flags(self, state, operation, left, right, result, width):
         self.clear_flags(state)
+        if operation == "cmp" and left.kind == "unsigned_range" and right.kind == "constant" and right.data == 0 and left.offset < 1 << (width - 1):
+            state.flags.update(zf=False if left.data > 0 else None, sf=False, cf=False, of=False)
+            return
         if operation in ("and", "or", "xor", "test"):
             state.flags.update(cf=False, of=False)
         if result.kind != "constant":
@@ -502,7 +518,9 @@ class Engine:
         if any(label.position == f.start and label.section == self.instructions[f.start].section
             for f in self.program.functions if f.start < len(self.instructions)):
             return None
-        raise Unsupported("Branch target is outside this function and is not a known function entry.")
+        if label.section == segment:
+            return label.position  # Shared blocks may precede an entry or follow another body.
+        raise Unsupported("Branch target is in another executable section.")
 
     def call(self, state, ops):
         self.need_count(ops, (1,))
@@ -615,6 +633,25 @@ class Engine:
                 self.adjust_sp(state, width // 8)
                 # Memory destinations using %rsp are evaluated after incrementing it.
                 self.write(state, ops[0], width, value)
+        elif operation == "syscall":
+            self.need_count(ops, (0,))
+            number = state.registers["rax"]
+            if number.kind != "constant" or number.data not in (0, 1, 60, 231):
+                raise Unsupported("Only Linux read, write, exit and exit_group syscalls with known numbers are modeled.")
+            if number.data in (60, 231):
+                return state, []
+            if number.data == 0:
+                pointer, length = state.registers["rsi"], state.registers["rdx"]
+                if length.kind != "constant" or length.data:
+                    for address, cell in list(state.memory.items()):
+                        if pointer.kind == "static_address":
+                            continue
+                        if pointer.kind == "stack" and length.kind == "constant":
+                            if address + cell.size <= pointer.data or address >= pointer.data + length.data:
+                                continue
+                        state.memory[address] = Cell(cell.size, unknown(cell.value, origin=pc))
+            for name in ("rax", "rcx", "r11"):
+                self.write_register(state, REGISTERS[name], unknown(origin=pc))
         elif operation == "call":
             self.call(state, ops)
         elif operation in ("jmp", "jcc", "loop", "loope", "loopne", "jrcxz", "jecxz", "jcxz"):
@@ -665,7 +702,8 @@ class Engine:
                 if ops[0].kind not in ("memory", "symbol") or ops[1].kind != "register" or width not in (16, 32, 64):
                     raise BadInstruction("lea requires a memory address and a word/dword/qword register destination.")
                 address = self.address(state, ops[0])
-                result = Value("stack", address, origins=(pc,)) if address is not None else unknown(origin=pc)
+                result = Value("stack", address, origins=(pc,)) if address is not None else (
+                    Value("static_address", ops[0].text, origins=(pc,)) if self.nonstack_address(state, ops[0]) else unknown(origin=pc))
             elif operation == "extend":
                 source_size = {"b": 8, "w": 16, "l": 32}[suffix[4]]
                 dest_size = {"w": 16, "l": 32, "q": 64}[suffix[5]]
@@ -813,7 +851,11 @@ class Engine:
                 self.clear_flags(state)
             self.write(state, dest, width, result)
         elif operation in ("imul", "mul", "div", "idiv"):
-            self.need_count(ops, (1, 2, 3) if operation == "imul" else (1,))
+            self.need_count(ops, (1, 2, 3) if operation == "imul" else (1, 2) if operation in ("div", "idiv") else (1,))
+            if operation in ("div", "idiv") and len(ops) == 2:
+                if not ops[1].register or ops[1].register.name != {8: "al", 16: "ax", 32: "eax", 64: "rax"}[width]:
+                    raise BadInstruction("The optional division destination must be the implicit accumulator of the operand size.")
+                ops = ops[:1]
             if len(ops) == 1:
                 if ops[0].kind == "immediate":
                     raise BadInstruction("One-operand multiplication/division cannot use an immediate.")
@@ -821,7 +863,16 @@ class Engine:
                 accumulator = REGISTERS[{8: "al", 16: "ax", 32: "eax", 64: "rax"}[width]]
                 old = self.read_register(state, accumulator)
                 result = unknown(source, old, origin=pc)
-                if operation in ("mul", "imul") and source.kind == old.kind == "constant":
+                high = self.read_register(state, REGISTERS[{8: "ah", 16: "dx", 32: "edx", 64: "rdx"}[width]])
+                if operation == "div" and source.kind == "constant" and source.data and high.kind == "constant" and high.data == 0:
+                    lower = old.data if old.kind in ("constant", "unsigned_range") else 0
+                    upper = old.data if old.kind == "constant" else old.offset if old.kind == "unsigned_range" else (1 << width) - 1
+                    low, high_bound = lower // source.data, upper // source.data
+                    quotient = Value("constant", low) if low == high_bound else Value("unsigned_range", low, high_bound)
+                    remainder = Value("constant", lower % source.data) if lower == upper else unknown(source, old, origin=pc)
+                    self.write_register(state, accumulator, quotient)
+                    self.write_register(state, REGISTERS[{8: "ah", 16: "dx", 32: "edx", 64: "rdx"}[width]], remainder)
+                elif operation in ("mul", "imul") and source.kind == old.kind == "constant":
                     product = (signed(source.data, width) * signed(old.data, width)) if operation == "imul" else source.data * old.data
                     if width == 8:
                         self.write_register(state, REGISTERS["ax"], Value("constant", product & 65535))
@@ -893,23 +944,77 @@ class Engine:
                 pass
         if malformed:
             return
-        states = {self.function.start: State.initial()}
-        queue = deque([self.function.start])
-        queued = {self.function.start}
+        # Keep small countdown loops separate until they exit. Joining different
+        # iterations immediately loses both the counter and balanced stack depth.
+        countdowns = []
+        for pc in range(self.function.start + 2, self.function.end):
+            branch, compare, decrement = self.instructions[pc], self.instructions[pc-1], self.instructions[pc-2]
+            if branch.mnemonic not in ("jne", "jnz", "jg", "ja") or len(branch.operands) != 1:
+                continue
+            if not compare.mnemonic.startswith("cmp") or len(compare.operands) != 2 or compare.operands[0].value != 0:
+                continue
+            counter = compare.operands[1].register
+            if not counter or not decrement.mnemonic.startswith("dec") or decrement.operands != (compare.operands[1],):
+                continue
+            self.pc = pc
+            target = self.direct_target(branch.operands[0])
+            if target is not None and self.function.start <= target < pc:
+                countdowns.append((target, pc, counter.parent))
+
+        divides = any(ins.mnemonic in ("div", "divb", "divw", "divl", "divq")
+                      for ins in self.instructions[self.function.start:self.function.end])
+
+        def key(pc, state):
+            values = []
+            for start, end, register in countdowns:
+                value = state.registers[register]
+                values.append(value.data if start <= pc <= end and value.kind == "constant" and 0 <= value.data <= 32 else None)
+            # ponytail: bounded stack partitions retain division-driven digit
+            # loops; other/large dynamic loops use joins and explicit uncertainty.
+            sp = state.registers["rsp"]
+            depth = sp.data if divides and sp.kind == "stack" and -512 <= sp.data <= 128 else None
+            return pc, depth, tuple(values)
+
+        initial = State.initial()
+        first = key(self.function.start, initial)
+        states = {first: initial}
+        queue = deque([first])
+        queued = {first}
+        segment = self.instructions[self.function.start].section
+        other_entries = {f.start for f in self.program.functions if f.start != self.function.start}
+
+        def in_body(pc, target):
+            if not (0 <= target < len(self.instructions)) or self.instructions[target].section != segment:
+                return False
+            if target == pc + 1 and (target == self.function.end or target in other_entries):
+                instruction = self.instructions[pc]
+                if instruction.mnemonic.startswith(("j", "loop")) and instruction.operands:
+                    # An explicit branch to an adjacent shared block is still a
+                    # branch, even when its address equals the fallthrough edge.
+                    self.pc = pc
+                    try:
+                        return self.direct_target(instruction.operands[0]) == target
+                    except (Unsupported, BadInstruction):
+                        return False
+                return False
+            return True
+
         steps, limit = 0, max(10000, 200 * self.coverage.total_instructions)
         while queue:
-            pc = queue.popleft()
-            queued.remove(pc)
-            result, successors = self.successors(pc, states[pc])
+            current = queue.popleft()
+            pc = current[0]
+            queued.remove(current)
+            result, successors = self.successors(pc, states[current])
             for target in successors:
-                if not self.function.start <= target < self.function.end:
+                if not in_body(pc, target):
                     continue
-                merged = states[target].join(result) if target in states else result.copy()
-                if target not in states or merged != states[target]:
-                    states[target] = merged
-                    if target not in queued:
-                        queue.append(target)
-                        queued.add(target)
+                target_key = key(target, result)
+                merged = states[target_key].join(result) if target_key in states else result.copy()
+                if target_key not in states or merged != states[target_key]:
+                    states[target_key] = merged
+                    if target_key not in queued:
+                        queue.append(target_key)
+                        queued.add(target_key)
             steps += 1
             if steps > limit:
                 self.emitting = True
@@ -919,18 +1024,21 @@ class Engine:
         # Emit only from stable incoming states, avoiding errors from transient loop/branch states.
         self.emitting = True
         self.successful.clear()
-        for pc in sorted(states):
-            _, successors = self.successors(pc, states[pc])
-            if any(target == self.function.end for target in successors):
+        for current in sorted(states, key=repr):
+            pc = current[0]
+            _, successors = self.successors(pc, states[current])
+            if any(not in_body(pc, target) for target in successors):
                 self.diagnostic("analysis_gap", "ANALYSIS_FALLTHROUGH",
                     "Control can fall through the identified function boundary.",
                     "End every reachable path with a return or a valid tail transfer; check the function metadata.")
-        self.coverage.reachable_instructions = len(states)
+        reached = {current[0] for current in states}
+        self.coverage.total_instructions = len(set(range(self.function.start, self.function.end)) | reached)
+        self.coverage.reachable_instructions = len(reached)
         self.coverage.analyzed_instructions = len(self.successful)
         self.coverage.incomplete_checks.sort()
 
 
-def analyze(source: str, *, filename: str = "<string>", entries=()) -> AnalysisReport:
+def analyze(source: str, *, filename: str = "<string>", entries=(), include_loader=None) -> AnalysisReport:
     """Analyze plain AT&T source without executing it or invoking an assembler."""
     if not isinstance(source, str):
         raise TypeError("source must be a string")
@@ -938,7 +1046,7 @@ def analyze(source: str, *, filename: str = "<string>", entries=()) -> AnalysisR
         raise TypeError("entries must be an iterable of entry names, not one string")
     entries = tuple(entries)
     report = AnalysisReport(filename)
-    program = parse(source, report, entries)
+    program = parse(source, report, entries, include_loader)
     if report.input_errors:
         return report.finish()
     for function in program.functions:

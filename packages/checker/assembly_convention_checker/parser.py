@@ -51,11 +51,48 @@ BINOPS = {
 UNOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg, ast.Invert: operator.invert}
 
 
+def character(text: str, start: int) -> tuple[int, int]:
+    """GNU character constants accept an optional closing apostrophe."""
+    end = start + 1
+    if end == len(text):
+        raise ParseError("Missing character after apostrophe")
+    char = text[end]
+    end += 1
+    if char == "\\":
+        if end == len(text):
+            raise ParseError("Incomplete character escape")
+        escape = re.match(r"[0-7]{1,3}|x[0-9a-fA-F]+|.", text[end:])
+        token = escape[0]
+        end += len(token)
+        if token[0] in "01234567":
+            value = int(token, 8)
+        elif token.startswith("x") and len(token) > 1:
+            value = int(token[1:], 16)
+        else:
+            value = ord({"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "a": "\a"}.get(token, token))
+    else:
+        value = ord(char)
+    if end < len(text) and text[end] == "'":
+        end += 1
+    if value > 255:
+        raise ParseError("Character constant must fit in one byte")
+    return value, end
+
+
 def constant(expression: str, symbols: dict[str, int | None]) -> int | None:
     """Evaluate a small integer grammar; unresolved symbols remain unknown."""
     expression = expression.strip()
     if not expression:
         return 0
+    converted, i = [], 0
+    while i < len(expression):
+        if expression[i] == "'":
+            value, i = character(expression, i)
+            converted.append(str(value))
+        else:
+            converted.append(expression[i])
+            i += 1
+    expression = "".join(converted)
     names: dict[str, str] = {}
 
     def rename(match):
@@ -101,7 +138,13 @@ def constant(expression: str, symbols: dict[str, int | None]) -> int | None:
 
 def split_operands(text: str) -> list[str]:
     result, start, depth, quoted, escaped = [], 0, 0, False, False
+    character_end = 0
     for i, char in enumerate(text):
+        if i < character_end:
+            continue
+        if not quoted and char == "'":
+            _, character_end = character(text, i)
+            continue
         if escaped:
             escaped = False
         elif char == "\\" and quoted:
@@ -199,6 +242,13 @@ def statements(source: str, filename: str):
                     buffer.append(" ")
                     i += 1
                 continue
+            if not quote and char == "'":
+                _, end = character(line, i)
+                if first is None:
+                    first = i + 1
+                buffer.append(line[i:end])
+                i = end
+                continue
             if not quote and line[i:i + 2] == "/*":
                 block_comment = True
                 buffer.append("  ")
@@ -230,10 +280,25 @@ def statements(source: str, filename: str):
         raise ParseError("Unclosed block comment")
 
 
-def parse(source: str, report, entries: tuple[str, ...]) -> Program:
+def parse(source: str, report, entries: tuple[str, ...], include_loader=None) -> Program:
     program = Program()
+
+    def expand(text, filename, active=()):
+        if filename in active or len(active) >= 32:
+            raise ParseError(f"Recursive include or include nesting limit reached: {filename}")
+        for statement, location in statements(text, filename):
+            match = re.fullmatch(r'\.include\s+"([^"\n]+)"', statement, re.I)
+            if match and include_loader is not None:
+                try:
+                    included_name, included_source = include_loader(match[1], filename)
+                    yield from expand(included_source, included_name, (*active, filename))
+                except (OSError, UnicodeError, ParseError) as exc:
+                    report.input_errors = True
+                    report.diagnostics.append(Diagnostic("error", "INPUT_INCLUDE", str(exc), location))
+            else:
+                yield statement, location
     try:
-        items = list(statements(source, report.filename))
+        items = list(expand(source, report.filename))
     except ParseError as exc:
         report.input_errors = True
         report.diagnostics.append(Diagnostic("error", "INPUT_SYNTAX", str(exc), SourceLocation(report.filename, 1)))
@@ -253,6 +318,7 @@ def parse(source: str, report, entries: tuple[str, ...]) -> Program:
 
     symbols: dict[str, int | None] = {}
     global_names, typed = set(), set()
+    address_taken = set()
     explicit_ends: dict[str, int] = {}
     cfi_starts: dict[str, int] = {}
     cfi_ends: dict[str, int] = {}
@@ -378,6 +444,8 @@ def parse(source: str, report, entries: tuple[str, ...]) -> Program:
                 program.functions = []
                 return Program()
             if head in DATA or head.startswith("."):
+                if head in (".quad", ".long"):
+                    address_taken.update(arg for arg in split_operands(rest) if re.fullmatch(r"[A-Za-z_.$][\w.$]*", arg))
                 if executable:
                     add_gap(text, location, "Executable data encodings or this directive are unsupported.")
                 elif head not in DATA and head not in (".comm", ".lcomm"):
@@ -403,7 +471,9 @@ def parse(source: str, report, entries: tuple[str, ...]) -> Program:
             syntax(f"Requested entry label does not exist in executable source: {name}", SourceLocation(report.filename, 1))
     if report.input_errors:
         return program
-    candidates = typed | set(cfi_starts) | global_names | selected
+    called = {op.text.removesuffix("@PLT") for ins in program.instructions if ins.mnemonic in ("call", "callq")
+              for op in ins.operands if op.kind == "symbol" and not op.indirect}
+    candidates = typed | set(cfi_starts) | global_names | selected | called | address_taken
     grouped: dict[tuple[int, int], list[Label]] = {}
     for name in candidates:
         if name in named:
